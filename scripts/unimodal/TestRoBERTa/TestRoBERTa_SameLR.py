@@ -1,30 +1,38 @@
+import argparse
+import sys
+
 import pandas as pd
 import numpy as np
-from transformers import AutoModel, AutoTokenizer, AutoConfig, DataCollatorWithPadding
-from datasets import Dataset, DatasetDict
+from transformers import AutoTokenizer, AutoModel,AutoConfig, DataCollatorWithPadding
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import lightning.pytorch as pl
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score,confusion_matrix
+from PIL import Image
 
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
-from lightning.pytorch.loggers import CSVLogger
+import os
+import torchvision.transforms as T
+from torchvision.transforms import Compose
+from datasets import Dataset, DatasetDict
+import seaborn as sns
+
+# Import the file in which the class is located
 
 
-if __name__== '__main__': # For potential concurrency issues with dataloaders
 
+def main():
+    
     SEED=1234542
 
     pl.seed_everything(SEED, workers=True)
 
-    df_train=pd.read_csv('../../data/splitted/train.csv')
-    df_validation=pd.read_csv('../../data/splitted/validation.csv')
-    df_test=pd.read_csv('../../data/splitted/test.csv')
+    df_train=pd.read_csv('../../../data/splitted/train.csv')
+    df_validation=pd.read_csv('../../../data/splitted/validation.csv')
+    df_test=pd.read_csv('../../../data/splitted/test.csv')
 
     dataset = DatasetDict()
     dataset['train'] = Dataset.from_pandas(df_train)
@@ -41,8 +49,9 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     #MODEL_NAME = 'microsoft/deberta-v3-base' # 512 seq length
     # MODEL_NAME = 'allenai/longformer-base-4096' # 4096 seq length
-    MODEL_NAME = 'mnaylor/mega-base-wikitext' # 2048 seq length
+    # MODEL_NAME = 'mnaylor/mega-base-wikitext' # 2048 seq length
     # MODEL_NAME='microsoft/deberta-base'
+    MODEL_NAME= 'roberta-base'
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     config = AutoConfig.from_pretrained(MODEL_NAME)
@@ -72,11 +81,10 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
     # Define the model architecture
 
     class TextClassifier(pl.LightningModule):
-        def __init__(self, model=pretrained_model,  lr_transformer=2e-5, lr_head=2e-3):
+        def __init__(self, model=pretrained_model,  lr_transformer=2e-5):
             super(TextClassifier, self).__init__()
             self.criterion = nn.CrossEntropyLoss()
             self.lr_transformer=lr_transformer
-            self.lr_head=lr_head
             
             # En el train hacemos media de medias
             self.train_loss=[]
@@ -90,17 +98,22 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
             self.all_val_y_pred=[]
             
             self.model = model
-            # self.fc1 = nn.Linear(config.hidden_size, 512)
-            self.fc1 = nn.Linear(config.hidden_size, 64) # Mega
+            #self.layer_norm = nn.LayerNorm(config.hidden_size)
+            self.fc1 = nn.Linear(config.hidden_size, 512)
+            # self.fc1 = nn.Linear(config.hidden_size, 64) # Mega
             self.activation1 = nn.GELU()
-            # self.output = nn.Linear(512, NUM_CLASSES)
-            self.output = nn.Linear(64, NUM_CLASSES) # Mega
+            self.output = nn.Linear(512, NUM_CLASSES)
+            # self.output = nn.Linear(64, NUM_CLASSES) # Mega
             
         def compute_outputs(self, input_ids, attention_mask):
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-            # logits = outputs['last_hidden_state'][:, 0]  #Get the CLS tokens (deberta)
-            logits = outputs.pooler_output
-            x = self.activation1(self.fc1(logits))
+
+            cls=outputs.last_hidden_state*attention_mask.unsqueeze(-1)
+            cls=torch.sum(cls,dim=1)
+            true_size_seq=torch.sum(attention_mask,dim=1).unsqueeze(-1)
+            cls=cls/true_size_seq
+            #x = self.layer_norm(logits)
+            x = self.activation1(self.fc1(cls))
             return self.output(x)
         
         def forward(self, batch):
@@ -174,10 +187,8 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
         
         def configure_optimizers(self):
             optimizer = optim.AdamW([
-                {'params': self.model.parameters(), 'lr': self.lr_transformer,'amsgrad':True, 'weight_decay':0.01 },
-                {'params': self.fc1.parameters()},
-                {'params': self.output.parameters()},
-            ],lr=self.lr_head, amsgrad=True, weight_decay=0.01)
+                {'params': self.parameters()},
+            ],lr=self.lr_transformer, amsgrad=True, weight_decay=0.01)
             
             scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.1, patience=5)
             return {
@@ -188,20 +199,71 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
                         },
                     }
 
-    experiment_name=f'Mega{MAX_LENGTH}_NoReg-DiffLR'
-    # Define the callbacks
-    checkpoint_callback = ModelCheckpoint(
-        dirpath='../../model_ckpts/Unimodal/Text/mnaylor',
-        filename=experiment_name,
-        monitor='val_f1', mode='max')
-    lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    early_stopping = EarlyStopping('val_f1', patience=15,mode='max')
+    checkpoint_path= '/home/nacho/work/model_ckpts/Unimodal/Text/Roberta_prueba.ckpt'
+    # Load the model from the checkpoint
+    model = TextClassifier.load_from_checkpoint(checkpoint_path, map_location='cuda:1')
 
-    # instantiate the logger object
-    logger = CSVLogger(save_dir="../../logs/Unimodal/Text/mnaylor", name=experiment_name)
+    #Get predictions
+    trainer=pl.Trainer(accelerator="gpu", devices=[1], deterministic=True, max_epochs=25, precision=16, accumulate_grad_batches=2)
+    predictions_test = trainer.predict(model, test_loader)
+    predictions_val = trainer.predict(model, validation_loader)
+    
+    compute_metrics(validation_loader, predictions_val, 'val', 'RoBERTa512_SameLR')
+    compute_metrics(test_loader, predictions_test, 'test', 'RoBERTa512_SameLR')
+    
     
 
-    my_model=TextClassifier(pretrained_model)
-    trainer=pl.Trainer(accelerator="gpu", devices=[1], deterministic=True, max_epochs=60, logger=logger, precision='16-mixed', accumulate_grad_batches=2, 
-                    callbacks=[lr_monitor, early_stopping, checkpoint_callback])
-    trainer.fit(model=my_model,train_dataloaders=train_loader, val_dataloaders=validation_loader)
+
+def compute_metrics(loader, predictions, split, ckpt):
+    original_stdout = sys.stdout # Save a reference to the original standard output
+    # Redirect print statements to a file
+    sys.stdout = open(f'../../../Val-TestResults/RoBERTa/Metrics/{ckpt}.txt', 'a')
+    
+    # initialize the variables for storing true and predicted labels
+    all_y_true = []
+    all_y_pred = []
+
+    # iterate over the batches and compute f1-score and confusion matrix for each batch
+    for i, batch in enumerate(loader):
+        preds=torch.argmax(predictions[i], dim=-1)
+        y_pred, y_true = preds.tolist(), batch['labels'].tolist()
+
+        # append the true and predicted labels to the corresponding lists
+        all_y_true.extend(y_true)
+        all_y_pred.extend(y_pred)
+
+      
+    mean_f1= f1_score(y_true=all_y_true, y_pred=all_y_pred, average='macro')
+    mean_acc=accuracy_score(y_true=all_y_true, y_pred=all_y_pred)
+    print(f'{split} Acc: {mean_acc}')
+    print(f'{split} F1: {mean_f1}')
+    print('-----------')
+    
+    sys.stdout = original_stdout # Reset the standard output to its original value
+    
+    cfm(all_y_true,all_y_pred, split, ckpt)
+    
+def cfm(y_true, y_pred, split, ckpt):
+
+    CLASSES_DICT= {0: 'Movies', 1: 'Sports', 2: 'Music', 3: 'Opinion', 4: 'Media', 5: 'Art & Design', 6: 'Theater', 7: 'Television', 8: 'Technology', 9: 'Economy', 10: 'Books', 11: 'Style', 12: 'Travel', 13: 'Health', 14: 'Real Estate', 15: 'Dance', 16: 'Science', 17: 'Fashion', 18: 'Well', 19: 'Food', 20: 'Your Money', 21: 'Education', 22: 'Automobiles', 23: 'Global Business'}
+    # compute the confusion matrix
+    cm = confusion_matrix(y_true=y_true, y_pred=y_pred)
+
+    # plot the confusion matrix as a heatmap
+    plt.figure(figsize=(12,10))
+    sns.heatmap(cm, annot=True, fmt='g', cmap='Blues')
+
+    # set the plot labels
+    class_names = [CLASSES_DICT[i] for i in CLASSES_DICT]
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.xticks(np.arange(24) + 0.5, class_names, rotation=90)
+    plt.yticks(np.arange(24) + 0.5, class_names, rotation=0)
+
+    dir= f'../../../Val-TestResults/RoBERTa/CFM/{ckpt}'
+    if not os.path.exists(dir):
+        os.mkdir(dir)
+    plt.savefig(f'../../../Val-TestResults/RoBERTa/CFM/{ckpt}/{split}.png')  
+    
+if __name__ == '__main__':
+    main()

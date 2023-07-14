@@ -1,53 +1,52 @@
+import argparse
+import sys
 
 import pandas as pd
 import numpy as np
-from transformers import AutoModel, CLIPProcessor, AutoConfig, AutoTokenizer
+from transformers import AutoTokenizer, AutoModel, AutoConfig, CLIPProcessor
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import lightning.pytorch as pl
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score,confusion_matrix
 from PIL import Image
 
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
-from lightning.pytorch.loggers import CSVLogger
 import os
 import torchvision.transforms as T
 from torchvision.transforms import Compose
-
 from datasets import Dataset, DatasetDict
+import seaborn as sns
 
-if __name__== '__main__': # For potential concurrency issues with dataloaders
+# Import the file in which the class is located
 
+
+
+def main(checkpoint):
+    
     SEED=1234542
 
     pl.seed_everything(SEED, workers=True)
 
-    df_train=pd.read_csv('../../../data/splitted/train.csv')
     df_validation=pd.read_csv('../../../data/splitted/validation.csv')
     df_test=pd.read_csv('../../../data/splitted/test.csv')
 
     # Remove nan from caption column
-    df_train.fillna(value="", inplace=True)
     df_validation.fillna(value="", inplace=True)
     df_test.fillna(value="", inplace=True)
 
     label_dict={0: 'Movies', 1: 'Sports', 2: 'Music', 3: 'Opinion', 4: 'Media', 5: 'Art & Design', 6: 'Theater', 7: 'Television', 8: 'Technology', 9: 'Economy', 10: 'Books', 11: 'Style', 12: 'Travel', 13: 'Health', 14: 'Real Estate', 15: 'Dance', 16: 'Science', 17: 'Fashion', 18: 'Well', 19: 'Food', 20: 'Your Money', 21: 'Education', 22: 'Automobiles', 23: 'Global Business'}
 
     dataset = DatasetDict()
-    dataset['train'] = Dataset.from_pandas(df_train)
     dataset['validation'] = Dataset.from_pandas(df_validation)
     dataset['test'] = Dataset.from_pandas(df_test)
 
-    NUM_CLASSES= len(df_train['labels'].unique())
+    NUM_CLASSES= len(df_validation['labels'].unique())
 
     TEXT_CLIP='caption'
 
-    TRAIN_IMAGES_PATH= '../../../images/train'
     VALIDATION_IMAGES_PATH= '../../../images/validation'
     TEST_IMAGES_PATH= '../../../images/test'
 
@@ -75,7 +74,6 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
 
     dataset = dataset.map(tokenize)
 
-    dataset['train'] = dataset['train'].remove_columns(['headline', 'abstract', 'caption', 'image_url', 'article_url', 'image_id', 'body', 'full_text', 'text_no_cap', 'labels_text'])
     dataset['validation'] = dataset['validation'].remove_columns(['headline', 'abstract', 'caption', 'image_url', 'article_url', 'image_id', 'body', 'full_text', 'text_no_cap', 'labels_text'])
     dataset['test'] = dataset['test'].remove_columns(['headline', 'abstract', 'caption', 'image_url', 'article_url', 'image_id', 'body', 'full_text', 'text_no_cap', 'labels_text'])
 
@@ -102,7 +100,6 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
             label = self.df['labels'].iloc[idx]
             return image, caption, text_input_ids, text_attention_mask, label
         
-    train_dataset= CustomMultimodalDataset(df_train, TRAIN_IMAGES_PATH, dataset['train'])
     validation_dataset= CustomMultimodalDataset(df_validation, VALIDATION_IMAGES_PATH, dataset['validation'])
     test_dataset= CustomMultimodalDataset(df_test, TEST_IMAGES_PATH, dataset['test'])
 
@@ -140,13 +137,12 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
 
     BATCH_SIZE=8
 
-    collator_train=MultimodalCollator(split='train')
     collator_val=MultimodalCollator(split='val')
     collator_test=MultimodalCollator(split='test')
-    train_loader = DataLoader(train_dataset, collate_fn=collator_train, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, prefetch_factor=8, pin_memory=True)
     validation_loader = DataLoader(validation_dataset, collate_fn=collator_val, batch_size=BATCH_SIZE, num_workers=4, prefetch_factor=8, pin_memory=True)
     test_loader = DataLoader(test_dataset, collate_fn=collator_test, batch_size=BATCH_SIZE, num_workers=4, prefetch_factor=8, pin_memory=True)
 
+    # Define the model architecture
 
     class MultimodalClassifier(pl.LightningModule):
         def __init__(self, clip_model=clip_model, text_transformer= pretrained_model,  lr_transformer=2e-5, lr_heads=2e-3):
@@ -348,23 +344,78 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
                         },
                     }
 
+    checkpoint_path= '/home/nacho/work/model_ckpts/Multimodal/CLIP+Longformer/MultiOutput_LongformerDiffLR-1024-CLIPv3_NoRegFusion.ckpt'
+    # Load the model from the checkpoint
+    model = MultimodalClassifier.load_from_checkpoint(checkpoint_path, map_location='cuda:1')
 
-    experiment_name=f'MultiOutput_LongformerDiffLR-{MAX_LENGTH}-CLIPv3_NoRegFusion'
-    # Define the callbacks
-    checkpoint_callback = ModelCheckpoint(
-        dirpath='../../../model_ckpts/Multimodal/CLIP+Longformer',
-        filename=experiment_name,
-        monitor='val_f1', mode='max')
-    lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    early_stopping = EarlyStopping('val_f1', patience=20,mode='max')
-
-    # instantiate the logger object
-    logger = CSVLogger(save_dir="../../../logs/Multimodal/CLIP+Longformer", name=experiment_name)
+    #Get predictions
+    trainer=pl.Trainer(accelerator="gpu", devices=[1], deterministic=True, max_epochs=25, precision=16, accumulate_grad_batches=2)
+    predictions_test = trainer.predict(model, test_loader)
+    predictions_val = trainer.predict(model, validation_loader)
+    
+    compute_metrics(validation_loader, predictions_val, 'val', checkpoint)
+    compute_metrics(test_loader, predictions_test, 'test', checkpoint)
+    
     
 
-    my_model=MultimodalClassifier()
-    trainer=pl.Trainer(accelerator="gpu", devices=[1], deterministic=True, max_epochs=60, logger=logger, precision='16-mixed', accumulate_grad_batches=2,
-                    callbacks=[lr_monitor, early_stopping, checkpoint_callback])
-    trainer.fit(model=my_model,train_dataloaders=train_loader, val_dataloaders=validation_loader)
 
+def compute_metrics(loader, predictions, split, ckpt):
+    original_stdout = sys.stdout # Save a reference to the original standard output
+    # Redirect print statements to a file
+    sys.stdout = open(f'../../../Val-TestResults/Multimodal/CLIP+Longformer/Metrics/{ckpt}.txt', 'a')
+    
+    # initialize the variables for storing true and predicted labels
+    all_y_true = []
+    all_y_pred = []
 
+    # iterate over the batches and compute f1-score and confusion matrix for each batch
+    for i, batch in enumerate(loader):
+        preds=torch.argmax(predictions[i], dim=-1)
+        y_pred, y_true = preds.tolist(), batch['labels'].tolist()
+
+        # append the true and predicted labels to the corresponding lists
+        all_y_true.extend(y_true)
+        all_y_pred.extend(y_pred)
+
+      
+    mean_f1= f1_score(y_true=all_y_true, y_pred=all_y_pred, average='macro')
+    mean_acc=accuracy_score(y_true=all_y_true, y_pred=all_y_pred)
+    print(f'{split} Acc: {mean_acc}')
+    print(f'{split} F1: {mean_f1}')
+    print('-----------')
+    
+    sys.stdout = original_stdout # Reset the standard output to its original value
+    
+    cfm(all_y_true,all_y_pred, split, ckpt)
+    
+def cfm(y_true, y_pred, split, ckpt):
+
+    CLASSES_DICT= {0: 'Movies', 1: 'Sports', 2: 'Music', 3: 'Opinion', 4: 'Media', 5: 'Art & Design', 6: 'Theater', 7: 'Television', 8: 'Technology', 9: 'Economy', 10: 'Books', 11: 'Style', 12: 'Travel', 13: 'Health', 14: 'Real Estate', 15: 'Dance', 16: 'Science', 17: 'Fashion', 18: 'Well', 19: 'Food', 20: 'Your Money', 21: 'Education', 22: 'Automobiles', 23: 'Global Business'}
+    # compute the confusion matrix
+    cm = confusion_matrix(y_true=y_true, y_pred=y_pred)
+
+    # plot the confusion matrix as a heatmap
+    plt.figure(figsize=(12,10))
+    sns.heatmap(cm, annot=True, fmt='g', cmap='Blues')
+
+    # set the plot labels
+    class_names = [CLASSES_DICT[i] for i in CLASSES_DICT]
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.xticks(np.arange(24) + 0.5, class_names, rotation=90)
+    plt.yticks(np.arange(24) + 0.5, class_names, rotation=0)
+
+    dir= f'../../../Val-TestResults/Multimodal/CLIP+Longformer/CFM/{ckpt}'
+    if not os.path.exists(dir):
+        os.mkdir(dir)
+    plt.savefig(f'../../../Val-TestResults/Multimodal/CLIP+Longformer/CFM/{ckpt}/{split}.png')  
+    
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Get validation and test F1 and accuracy and confusion matrix')
+    parser.add_argument('--ckpt', help='Name of the checkpoint file')
+    args = parser.parse_args()
+
+    # Call the main function with the arguments
+    
+    
+    main(args.ckpt)

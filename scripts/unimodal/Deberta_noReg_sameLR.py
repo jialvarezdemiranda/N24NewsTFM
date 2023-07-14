@@ -41,8 +41,8 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     #MODEL_NAME = 'microsoft/deberta-v3-base' # 512 seq length
     # MODEL_NAME = 'allenai/longformer-base-4096' # 4096 seq length
-    MODEL_NAME = 'mnaylor/mega-base-wikitext' # 2048 seq length
-    # MODEL_NAME='microsoft/deberta-base'
+    # MODEL_NAME = 'mnaylor/mega-base-wikitext' # 2048 seq length
+    MODEL_NAME='microsoft/deberta-base'
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     config = AutoConfig.from_pretrained(MODEL_NAME)
@@ -72,11 +72,10 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
     # Define the model architecture
 
     class TextClassifier(pl.LightningModule):
-        def __init__(self, model=pretrained_model,  lr_transformer=2e-5, lr_head=2e-3):
+        def __init__(self, model=pretrained_model,  lr_transformer=2e-5):
             super(TextClassifier, self).__init__()
             self.criterion = nn.CrossEntropyLoss()
             self.lr_transformer=lr_transformer
-            self.lr_head=lr_head
             
             # En el train hacemos media de medias
             self.train_loss=[]
@@ -90,16 +89,15 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
             self.all_val_y_pred=[]
             
             self.model = model
-            # self.fc1 = nn.Linear(config.hidden_size, 512)
-            self.fc1 = nn.Linear(config.hidden_size, 64) # Mega
+          
+            self.fc1 = nn.Linear(config.hidden_size, 512)
             self.activation1 = nn.GELU()
-            # self.output = nn.Linear(512, NUM_CLASSES)
-            self.output = nn.Linear(64, NUM_CLASSES) # Mega
+            self.output = nn.Linear(512, NUM_CLASSES)
+
             
         def compute_outputs(self, input_ids, attention_mask):
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
-            # logits = outputs['last_hidden_state'][:, 0]  #Get the CLS tokens (deberta)
-            logits = outputs.pooler_output
+            logits = outputs['last_hidden_state'][:, 0]  #Get the CLS tokens (deberta)
             x = self.activation1(self.fc1(logits))
             return self.output(x)
         
@@ -174,10 +172,8 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
         
         def configure_optimizers(self):
             optimizer = optim.AdamW([
-                {'params': self.model.parameters(), 'lr': self.lr_transformer,'amsgrad':True, 'weight_decay':0.01 },
-                {'params': self.fc1.parameters()},
-                {'params': self.output.parameters()},
-            ],lr=self.lr_head, amsgrad=True, weight_decay=0.01)
+                {'params': self.parameters()},
+            ],lr=self.lr_transformer, amsgrad=True, weight_decay=0.01)
             
             scheduler = ReduceLROnPlateau(optimizer=optimizer, factor=0.1, patience=5)
             return {
@@ -188,17 +184,17 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
                         },
                     }
 
-    experiment_name=f'Mega{MAX_LENGTH}_NoReg-DiffLR'
+    experiment_name=f'Deberta_{MAX_LENGTH}_NoRegSameLR' 
     # Define the callbacks
     checkpoint_callback = ModelCheckpoint(
-        dirpath='../../model_ckpts/Unimodal/Text/mnaylor',
+        dirpath='../../model_ckpts/Unimodal/Text/Deberta',
         filename=experiment_name,
         monitor='val_f1', mode='max')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     early_stopping = EarlyStopping('val_f1', patience=15,mode='max')
 
     # instantiate the logger object
-    logger = CSVLogger(save_dir="../../logs/Unimodal/Text/mnaylor", name=experiment_name)
+    logger = CSVLogger(save_dir="../../logs/Unimodal/Text/Deberta", name=experiment_name)
     
 
     my_model=TextClassifier(pretrained_model)

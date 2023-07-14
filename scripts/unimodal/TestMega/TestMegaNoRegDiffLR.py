@@ -1,41 +1,47 @@
+import argparse
+import sys
+
 import pandas as pd
 import numpy as np
-from transformers import AutoModel, AutoTokenizer, AutoConfig, DataCollatorWithPadding
-from datasets import Dataset, DatasetDict
+from transformers import AutoTokenizer, AutoModel,AutoConfig, DataCollatorWithPadding
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import lightning.pytorch as pl
 from torch.utils.data import DataLoader
-from sklearn.metrics import f1_score, accuracy_score
+from sklearn.metrics import f1_score, accuracy_score,confusion_matrix
+from PIL import Image
 
-from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor, EarlyStopping
-from lightning.pytorch.loggers import CSVLogger
+import os
+import torchvision.transforms as T
+from torchvision.transforms import Compose
+from datasets import Dataset, DatasetDict
+import seaborn as sns
+
+# Import the file in which the class is located
 
 
-if __name__== '__main__': # For potential concurrency issues with dataloaders
 
+def main(checkpoint, num_tokens):
+    
     SEED=1234542
 
     pl.seed_everything(SEED, workers=True)
 
-    df_train=pd.read_csv('../../data/splitted/train.csv')
-    df_validation=pd.read_csv('../../data/splitted/validation.csv')
-    df_test=pd.read_csv('../../data/splitted/test.csv')
+    df_validation=pd.read_csv('../../../data/splitted/validation.csv')
+    df_test=pd.read_csv('../../../data/splitted/test.csv')
 
     dataset = DatasetDict()
-    dataset['train'] = Dataset.from_pandas(df_train)
     dataset['validation'] = Dataset.from_pandas(df_validation)
     dataset['test'] = Dataset.from_pandas(df_test)
 
-    NUM_CLASSES= len(df_train['labels'].unique())
+    NUM_CLASSES= len(df_validation['labels'].unique())
     TEXT_USED='text_no_cap'
     # MAX_LENGTH=4096
     # MAX_LENGTH=4096
-    MAX_LENGTH=512
+    MAX_LENGTH=int(num_tokens)
 
     # Load transformer and tokenizer
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -56,7 +62,6 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
 
     dataset = dataset.map(tokenize)
 
-    dataset['train'] = dataset['train'].remove_columns(['headline', 'abstract', 'caption', 'image_url', 'article_url', 'image_id', 'body', 'full_text', 'text_no_cap', 'labels_text'])
     dataset['validation'] = dataset['validation'].remove_columns(['headline', 'abstract', 'caption', 'image_url', 'article_url', 'image_id', 'body', 'full_text', 'text_no_cap', 'labels_text'])
     dataset['test'] = dataset['test'].remove_columns(['headline', 'abstract', 'caption', 'image_url', 'article_url', 'image_id', 'body', 'full_text', 'text_no_cap', 'labels_text'])
 
@@ -65,7 +70,6 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
     BATCH_SIZE = 8
 
     data_collator = DataCollatorWithPadding(tokenizer)
-    train_loader = DataLoader(dataset['train'], batch_size=BATCH_SIZE, collate_fn=data_collator,shuffle=True, num_workers=4, prefetch_factor=8, pin_memory=True)
     validation_loader = DataLoader(dataset['validation'], batch_size=BATCH_SIZE, collate_fn=data_collator, num_workers=4, prefetch_factor=8, pin_memory=True)
     test_loader = DataLoader(dataset['test'], batch_size=BATCH_SIZE, collate_fn=data_collator, num_workers=4, prefetch_factor=8, pin_memory=True)
 
@@ -188,20 +192,79 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
                         },
                     }
 
-    experiment_name=f'Mega{MAX_LENGTH}_NoReg-DiffLR'
-    # Define the callbacks
-    checkpoint_callback = ModelCheckpoint(
-        dirpath='../../model_ckpts/Unimodal/Text/mnaylor',
-        filename=experiment_name,
-        monitor='val_f1', mode='max')
-    lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    early_stopping = EarlyStopping('val_f1', patience=15,mode='max')
+    checkpoint_path= '/home/nacho/work/model_ckpts/Unimodal/Text/mnaylor/Mega512_NoReg-DiffLR.ckpt'
+    # Load the model from the checkpoint
+    model = TextClassifier.load_from_checkpoint(checkpoint_path, map_location='cuda:1')
 
-    # instantiate the logger object
-    logger = CSVLogger(save_dir="../../logs/Unimodal/Text/mnaylor", name=experiment_name)
+    #Get predictions
+    trainer=pl.Trainer(accelerator="gpu", devices=[1], deterministic=True, max_epochs=25, precision=16, accumulate_grad_batches=2)
+    predictions_test = trainer.predict(model, test_loader)
+    predictions_val = trainer.predict(model, validation_loader)
+    
+    compute_metrics(validation_loader, predictions_val, 'val', checkpoint)
+    compute_metrics(test_loader, predictions_test, 'test', checkpoint)
+    
     
 
-    my_model=TextClassifier(pretrained_model)
-    trainer=pl.Trainer(accelerator="gpu", devices=[1], deterministic=True, max_epochs=60, logger=logger, precision='16-mixed', accumulate_grad_batches=2, 
-                    callbacks=[lr_monitor, early_stopping, checkpoint_callback])
-    trainer.fit(model=my_model,train_dataloaders=train_loader, val_dataloaders=validation_loader)
+
+def compute_metrics(loader, predictions, split, ckpt):
+    original_stdout = sys.stdout # Save a reference to the original standard output
+    # Redirect print statements to a file
+    sys.stdout = open(f'../../../Val-TestResults/Unimodal/Mega/Metrics/{ckpt}.txt', 'a')
+    
+    # initialize the variables for storing true and predicted labels
+    all_y_true = []
+    all_y_pred = []
+
+    # iterate over the batches and compute f1-score and confusion matrix for each batch
+    for i, batch in enumerate(loader):
+        preds=torch.argmax(predictions[i], dim=-1)
+        y_pred, y_true = preds.tolist(), batch['labels'].tolist()
+
+        # append the true and predicted labels to the corresponding lists
+        all_y_true.extend(y_true)
+        all_y_pred.extend(y_pred)
+
+      
+    mean_f1= f1_score(y_true=all_y_true, y_pred=all_y_pred, average='macro')
+    mean_acc=accuracy_score(y_true=all_y_true, y_pred=all_y_pred)
+    print(f'{split} Acc: {mean_acc}')
+    print(f'{split} F1: {mean_f1}')
+    print('-----------')
+    
+    sys.stdout = original_stdout # Reset the standard output to its original value
+    
+    cfm(all_y_true,all_y_pred, split, ckpt)
+    
+def cfm(y_true, y_pred, split, ckpt):
+
+    CLASSES_DICT= {0: 'Movies', 1: 'Sports', 2: 'Music', 3: 'Opinion', 4: 'Media', 5: 'Art & Design', 6: 'Theater', 7: 'Television', 8: 'Technology', 9: 'Economy', 10: 'Books', 11: 'Style', 12: 'Travel', 13: 'Health', 14: 'Real Estate', 15: 'Dance', 16: 'Science', 17: 'Fashion', 18: 'Well', 19: 'Food', 20: 'Your Money', 21: 'Education', 22: 'Automobiles', 23: 'Global Business'}
+    # compute the confusion matrix
+    cm = confusion_matrix(y_true=y_true, y_pred=y_pred)
+
+    # plot the confusion matrix as a heatmap
+    plt.figure(figsize=(12,10))
+    sns.heatmap(cm, annot=True, fmt='g', cmap='Blues')
+
+    # set the plot labels
+    class_names = [CLASSES_DICT[i] for i in CLASSES_DICT]
+    plt.xlabel('Predicted Labels')
+    plt.ylabel('True Labels')
+    plt.xticks(np.arange(24) + 0.5, class_names, rotation=90)
+    plt.yticks(np.arange(24) + 0.5, class_names, rotation=0)
+
+    dir= f'../../../Val-TestResults//Unimodal/Mega/CFM/{ckpt}'
+    if not os.path.exists(dir):
+        os.mkdir(dir)
+    plt.savefig(f'../../../Val-TestResults//Unimodal/Mega/CFM/{ckpt}/{split}.png')  
+    
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Get validation and test F1 and accuracy and confusion matrix')
+    parser.add_argument('--ckpt', help='Name of the checkpoint file')
+    parser.add_argument('--tokens', help='Number of tokens to compute')
+    args = parser.parse_args()
+
+    # Call the main function with the arguments
+    
+    
+    main(args.ckpt, args.tokens)

@@ -1,2 +1,7 @@
 images
 data
+model_ckpts
+.env
+docker-compose.yml
+CKPTS filezilla
+jupyterlab_GPU

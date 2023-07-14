@@ -24,9 +24,9 @@ SEED=1234542
 
 pl.seed_everything(SEED, workers=True)
 
-df_train=pd.read_csv('../../data/splitted/train.csv')
-df_validation=pd.read_csv('../../data/splitted/validation.csv')
-df_test=pd.read_csv('../../data/splitted/test.csv')
+df_train=pd.read_csv('../../../data/splitted/train.csv')
+df_validation=pd.read_csv('../../../data/splitted/validation.csv')
+df_test=pd.read_csv('../../../data/splitted/test.csv')
 
 # Remove nan from caption column
 df_train.fillna(value="", inplace=True)
@@ -38,9 +38,9 @@ NUM_CLASSES= len(df_train['labels'].unique())
 
 TEXT_USED='caption'
 
-TRAIN_IMAGES_PATH= '../../images/train'
-VALIDATION_IMAGES_PATH= '../../images/validation'
-TEST_IMAGES_PATH= '../../images/test'
+TRAIN_IMAGES_PATH= '../../../images/train'
+VALIDATION_IMAGES_PATH= '../../../images/validation'
+TEST_IMAGES_PATH= '../../../images/test'
 
 
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -237,14 +237,14 @@ class CLIPClassifier(pl.LightningModule):
 experiment_name=f'CLIP_max'
 # Define the callbacks
 checkpoint_callback = ModelCheckpoint(
-     dirpath='../../model_ckpts/Multimodal/CLIPEmbeds',
+     dirpath='../../../model_ckpts/Multimodal/CLIPEmbeds',
      filename=experiment_name,
      monitor='val_f1', mode='max')
 lr_monitor = LearningRateMonitor(logging_interval='epoch')
 early_stopping = EarlyStopping('val_f1', patience=15,mode='max')
 
 # instantiate the logger object
-logger = CSVLogger(save_dir="../../logs/Multimodal/CLIPEmbeds", name=experiment_name)
+logger = CSVLogger(save_dir="../../../logs/Multimodal/CLIPEmbeds", name=experiment_name)
  
 
 my_model=CLIPClassifier(pretrained_model, lr=2e-3)

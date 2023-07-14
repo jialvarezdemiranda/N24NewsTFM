@@ -35,13 +35,13 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
     TEXT_USED='text_no_cap'
     # MAX_LENGTH=4096
     # MAX_LENGTH=4096
-    MAX_LENGTH=512
+    MAX_LENGTH=1024
 
     # Load transformer and tokenizer
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     #MODEL_NAME = 'microsoft/deberta-v3-base' # 512 seq length
-    # MODEL_NAME = 'allenai/longformer-base-4096' # 4096 seq length
-    MODEL_NAME = 'mnaylor/mega-base-wikitext' # 2048 seq length
+    MODEL_NAME = 'allenai/longformer-base-4096' # 4096 seq length
+    # MODEL_NAME = 'mnaylor/mega-base-wikitext' # 2048 seq length
     # MODEL_NAME='microsoft/deberta-base'
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -90,11 +90,11 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
             self.all_val_y_pred=[]
             
             self.model = model
-            # self.fc1 = nn.Linear(config.hidden_size, 512)
-            self.fc1 = nn.Linear(config.hidden_size, 64) # Mega
+            self.fc1 = nn.Linear(config.hidden_size, 512)
+            # self.fc1 = nn.Linear(config.hidden_size, 64) # Mega
             self.activation1 = nn.GELU()
-            # self.output = nn.Linear(512, NUM_CLASSES)
-            self.output = nn.Linear(64, NUM_CLASSES) # Mega
+            self.output = nn.Linear(512, NUM_CLASSES)
+            # self.output = nn.Linear(64, NUM_CLASSES) # Mega
             
         def compute_outputs(self, input_ids, attention_mask):
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
@@ -188,17 +188,17 @@ if __name__== '__main__': # For potential concurrency issues with dataloaders
                         },
                     }
 
-    experiment_name=f'Mega{MAX_LENGTH}_NoReg-DiffLR'
+    experiment_name=f'Longformer_{MAX_LENGTH}_NoReg_DiffLR'
     # Define the callbacks
     checkpoint_callback = ModelCheckpoint(
-        dirpath='../../model_ckpts/Unimodal/Text/mnaylor',
+        dirpath='../../model_ckpts/Unimodal/Text/LongFormerNoRegDiffLR',
         filename=experiment_name,
         monitor='val_f1', mode='max')
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     early_stopping = EarlyStopping('val_f1', patience=15,mode='max')
 
     # instantiate the logger object
-    logger = CSVLogger(save_dir="../../logs/Unimodal/Text/mnaylor", name=experiment_name)
+    logger = CSVLogger(save_dir="../../logs/Unimodal/Text/LongFormerNoRegDiffLR", name=experiment_name)
     
 
     my_model=TextClassifier(pretrained_model)
